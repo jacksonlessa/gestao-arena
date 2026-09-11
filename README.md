@@ -70,5 +70,5 @@ de acontecer vira caça ao fantasma de produção desatualizada.
 O `vercel.json` não aceita propriedades fora do schema — nem uma chave `"//"`
 de comentário. Por isso esta nota mora aqui.
 
-Segredos necessários no repositório: `DO_HOST`, `DO_USER`, `DO_SSH_KEY`,
-`DO_APP_PATH`.
+Deploy do backend, configuração única do droplet e secrets do repositório:
+[`.github/deploy/README.md`](.github/deploy/README.md).

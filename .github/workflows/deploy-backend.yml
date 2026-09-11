@@ -9,78 +9,143 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/deploy-backend.yml'
+      - '.github/workflows/backend-ci.yml'
+      - '.github/deploy/**'
+  workflow_dispatch:
 
+# Um deploy por vez. Pushes seguidos entram na fila (o mais novo substitui o
+# que estiver esperando); um deploy em andamento nunca é cancelado no meio.
 concurrency:
   group: deploy-backend
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
+env:
+  # Mesma versão major do Node do droplet. O script remoto confere e aborta
+  # antes de tocar em produção se divergir. Manter igual ao backend-ci.yml.
+  NODE_VERSION: '24'
+  # Relativo ao $HOME do usuário de deploy (entretimes-deploy) no droplet.
+  REMOTE_BASE_DIR: apps/gestao-arena-api
+  PUBLIC_URL: https://arenas-api.entretimes.com.br
+
 jobs:
+  # Teste vermelho impede a publicação (RF27).
   qualidade:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
-      - run: npm ci
-        working-directory: backend
-      - run: npx prisma generate
-        working-directory: backend
-      - run: npm run lint
-        working-directory: backend
-      - run: npm test
-        working-directory: backend
-      - run: npm run build
-        working-directory: backend
+    uses: ./.github/workflows/backend-ci.yml
 
   publicar:
-    # Teste vermelho impede a publicação (RF27).
+    name: Build and deploy to droplet
     needs: qualidade
-    runs-on: ubuntu-latest
+    # Versão fixa (não ubuntu-latest): node_modules e engines do Prisma saem
+    # compilados para esta plataforma (x86_64, OpenSSL 3), a mesma do droplet.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
 
-      - name: Conferir segredos
-        run: |
-          for s in DO_HOST DO_USER DO_SSH_KEY DO_APP_PATH; do
-            if [ -z "${!s}" ]; then
-              echo "Segredo ausente: $s"; exit 1
-            fi
-          done
-        env:
-          DO_HOST: ${{ secrets.DO_HOST }}
-          DO_USER: ${{ secrets.DO_USER }}
-          DO_SSH_KEY: ${{ secrets.DO_SSH_KEY }}
-          DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
-
-      - name: Publicar no DigitalOcean
-        uses: appleboy/ssh-action@v1
+      - uses: actions/setup-node@v4
         with:
-          host: ${{ secrets.DO_HOST }}
-          username: ${{ secrets.DO_USER }}
-          key: ${{ secrets.DO_SSH_KEY }}
-          script: |
-            set -e
-            cd ${{ secrets.DO_APP_PATH }}
-            git fetch --all
-            git reset --hard origin/main
-            npm --prefix backend ci --omit=dev
-            npx --prefix backend prisma generate
-            # migrate deploy, nunca migrate dev (RF14).
-            npx --prefix backend prisma migrate deploy
-            npm --prefix backend run build
-            pm2 reload gestao-arena-api --update-env
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
 
-      - name: Confirmar healthcheck
+      # ---- Build: tudo no runner, nada no droplet ---------------------------
+
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run build
+
+      # O CLI do Prisma é devDependency e sai no prune abaixo, mas o droplet
+      # precisa dele para o `migrate deploy`. Vai numa pasta à parte, na mesma
+      # versão do projeto, sem mexer no package.json.
+      - name: Bundle Prisma CLI for the droplet
         run: |
-          for i in $(seq 1 10); do
-            if curl -fsS "$URL/health" > /dev/null; then
-              echo "Healthcheck ok"; exit 0
+          PRISMA_VERSION="$(node -p "require('./node_modules/prisma/package.json').version")"
+          mkdir -p .deploy-tools/prisma
+          echo '{ "private": true }' > .deploy-tools/prisma/package.json
+          npm install --prefix .deploy-tools/prisma --no-audit --no-fund "prisma@${PRISMA_VERSION}"
+
+      - run: npm prune --omit=dev
+
+      - name: Package release
+        id: package
+        run: |
+          RELEASE_ID="$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}"
+          echo "$GITHUB_SHA" > REVISION
+          tar -czf "$RUNNER_TEMP/$RELEASE_ID.tgz" \
+            --exclude='node_modules/.cache' \
+            dist node_modules prisma package.json package-lock.json .deploy-tools REVISION
+          du -h "$RUNNER_TEMP/$RELEASE_ID.tgz"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
+      # ---- Deploy ------------------------------------------------------------
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+        run: |
+          for s in SSH_KEY DEPLOY_HOST DEPLOY_USER; do
+            [ -n "${!s}" ] || { echo "::error::Secret ausente: ${s/SSH_KEY/DEPLOY_SSH_KEY}"; exit 1; }
+          done
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          if [ -n "$KNOWN_HOSTS" ]; then
+            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "::warning::Secret DEPLOY_KNOWN_HOSTS não configurado: a chave do droplet está sendo aceita sem verificação (ssh-keyscan)."
+            ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" > ~/.ssh/known_hosts 2>/dev/null
+          fi
+
+          cat > ~/.ssh/config <<SSHCONFIG
+          Host droplet
+            HostName $DEPLOY_HOST
+            Port $DEPLOY_PORT
+            User $DEPLOY_USER
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          SSHCONFIG
+          chmod 600 ~/.ssh/config
+
+      - name: Upload release to droplet
+        env:
+          RELEASE_ID: ${{ steps.package.outputs.release_id }}
+        run: |
+          # shellcheck disable=SC2029 # expansão local proposital (REMOTE_BASE_DIR)
+          ssh droplet "mkdir -p \"\$HOME/$REMOTE_BASE_DIR/incoming\""
+          scp -q "$RUNNER_TEMP/$RELEASE_ID.tgz" ../.github/deploy/remote-deploy.sh \
+            "droplet:$REMOTE_BASE_DIR/incoming/"
+
+      - name: Activate release (migrate, switch, healthcheck, rollback)
+        env:
+          RELEASE_ID: ${{ steps.package.outputs.release_id }}
+        run: |
+          # shellcheck disable=SC2029 # expansão local proposital (RELEASE_ID, NODE_VERSION)
+          ssh droplet "BASE_DIR=\"\$HOME/$REMOTE_BASE_DIR\" bash \"\$HOME/$REMOTE_BASE_DIR/incoming/remote-deploy.sh\" '$RELEASE_ID' '${NODE_VERSION%%.*}'"
+
+      # O script remoto já validou o /health pela porta local. Este passo prova
+      # o caminho público inteiro: DNS, Nginx, TLS. Falhar aqui com o passo
+      # anterior verde = aplicação no ar, mas algo na frente dela quebrado.
+      - name: Public healthcheck
+        run: |
+          for _ in $(seq 1 10); do
+            if curl -fsS "$PUBLIC_URL/health" | jq -e '.status == "ok"' > /dev/null; then
+              echo "Healthcheck público ok"; exit 0
             fi
             sleep 6
           done
-          echo "Healthcheck não respondeu após a publicação"; exit 1
-        env:
-          URL: https://arenas-api.entretimes.com.br
+          echo "::error::$PUBLIC_URL/health não respondeu status \"ok\". A aplicação passou no healthcheck local do droplet — confira DNS, Nginx e TLS."
+          exit 1

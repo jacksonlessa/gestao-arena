@@ -27,27 +27,13 @@ jobs:
               - 'front/**'
               - '.github/workflows/**'
 
+  # Em push na main, o backend é validado pelo deploy-backend.yml (que chama o
+  # mesmo backend-ci.yml antes de publicar). Rodar aqui também duplicaria o
+  # trabalho a cada push; em pull request, só este roda.
   backend:
     needs: mudancas
-    if: needs.mudancas.outputs.backend == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
-      - run: npm ci
-        working-directory: backend
-      - run: npx prisma generate
-        working-directory: backend
-      - run: npm run lint
-        working-directory: backend
-      - run: npm test
-        working-directory: backend
-      - run: npm run build
-        working-directory: backend
+    if: needs.mudancas.outputs.backend == 'true' && github.event_name == 'pull_request'
+    uses: ./.github/workflows/backend-ci.yml
 
   front:
     needs: mudancas

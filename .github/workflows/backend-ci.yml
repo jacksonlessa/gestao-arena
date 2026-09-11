@@ -1,0 +1,70 @@
+name: Backend CI
+
+# Lint, teste e build do backend contra um MySQL 8.0 de verdade. Workflow
+# reutilizável: chamado pelo ci.yml (pull requests) e pelo deploy-backend.yml
+# (push na main), para que a publicação só aconteça com tudo verde (RF27).
+on:
+  workflow_call:
+
+env:
+  # Mesma versão major do Node do droplet (remote-deploy.sh confere).
+  NODE_VERSION: '24'
+
+jobs:
+  backend:
+    name: Lint, test and build (backend)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+
+    # Mesma versão principal da produção e do docker-compose (RF12).
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: gestao_arena
+          MYSQL_USER: arena
+          MYSQL_PASSWORD: arena
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    # O runner não tem .env (fica fora do Git). Estas são as variáveis que a
+    # validação de ambiente (RF09) e os testes esperam — só valores de teste.
+    env:
+      NODE_ENV: test
+      DATABASE_URL: mysql://arena:arena@127.0.0.1:3306/gestao_arena
+      CORS_ORIGIN_OPERACAO: http://arenas.localhost:3000
+      CORS_ORIGIN_BACKOFFICE: http://backoffice-arenas.localhost:3000
+      APP_NAME: gestao-arena-api
+      APP_VERSION: ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      # O client do Prisma não vem no npm ci. Sem ele, lint type-checked,
+      # testes e build enxergam o PrismaClient como `any`.
+      - run: npx prisma generate
+
+      # Aplica todas as migrações num banco vazio: a mesma operação que o
+      # deploy faz em produção (RF14). Migração quebrada falha aqui, não lá.
+      - name: Apply migrations to a fresh MySQL
+        run: npx prisma migrate deploy
+
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build

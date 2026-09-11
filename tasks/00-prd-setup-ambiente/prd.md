@@ -168,13 +168,14 @@ Resolvidas no esqueleto, registradas aqui por rastreabilidade:
 - **Hosts em desenvolvimento**: `arenas.localhost` e `backoffice-arenas.localhost`,
   que resolvem para 127.0.0.1 sozinhos nos navegadores atuais, sem `/etc/hosts`.
   O banco local expõe a porta **3307** para não colidir com um MySQL já instalado.
+- **Execução no droplet**: `pm2` sob o usuário `entretimes-deploy` (o mesmo do
+  EntreTimes), com releases compilados no runner e trocados com healthcheck e
+  rollback. Detalhes em `.github/deploy/README.md`.
 
 Ainda em aberto:
 
-1. Região e formato da instância no DigitalOcean, e como o backend é mantido em
-   execução — o workflow assume `pm2` e um checkout em `DO_APP_PATH`.
-2. Como autenticar em deploys de preview da Vercel, que ficam em `*.vercel.app` e
+1. Como autenticar em deploys de preview da Vercel, que ficam em `*.vercel.app` e
    são cross-site: apontar previews para subdomínio de `entretimes.com.br`, ou
    deixar previews sem sessão autenticada.
-3. Se `arenas-api` fica atrás de proxy com TLS gerenciado no droplet ou de um
+2. Se `arenas-api` fica atrás de proxy com TLS gerenciado no droplet ou de um
    balanceador.
