@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Lint, teste e build dos dois lados. Cada job só roda quando o seu lado muda —
+# um commit em docs/ ou tasks/ não gasta CI nem arrisca publicação (RF24).
+jobs:
+  mudancas:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filtro.outputs.backend }}
+      front: ${{ steps.filtro.outputs.front }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filtro
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/**'
+            front:
+              - 'front/**'
+              - '.github/workflows/**'
+
+  backend:
+    needs: mudancas
+    if: needs.mudancas.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+        working-directory: backend
+      - run: npx prisma generate
+        working-directory: backend
+      - run: npm run lint
+        working-directory: backend
+      - run: npm test
+        working-directory: backend
+      - run: npm run build
+        working-directory: backend
+
+  front:
+    needs: mudancas
+    if: needs.mudancas.outputs.front == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+      - run: npm ci
+        working-directory: front
+      - run: npm run lint
+        working-directory: front
+      - run: npm test
+        working-directory: front
+      - run: npm run build
+        working-directory: front
+        env:
+          NEXT_PUBLIC_HOST_OPERACAO: arenas.entretimes.com.br
+          NEXT_PUBLIC_HOST_BACKOFFICE: backoffice-arenas.entretimes.com.br
+          NEXT_PUBLIC_API_URL: https://arenas-api.entretimes.com.br

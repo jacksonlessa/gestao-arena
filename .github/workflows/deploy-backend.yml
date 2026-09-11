@@ -1,0 +1,86 @@
+name: Deploy backend
+
+# Publica APENAS quando o backend muda (RF26). Sem este filtro, um commit em
+# documentação reiniciaria o backend em produção — com arena real usando a
+# agenda, isso é indisponibilidade sem motivo.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/deploy-backend.yml'
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  qualidade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+        working-directory: backend
+      - run: npx prisma generate
+        working-directory: backend
+      - run: npm run lint
+        working-directory: backend
+      - run: npm test
+        working-directory: backend
+      - run: npm run build
+        working-directory: backend
+
+  publicar:
+    # Teste vermelho impede a publicação (RF27).
+    needs: qualidade
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Conferir segredos
+        run: |
+          for s in DO_HOST DO_USER DO_SSH_KEY DO_APP_PATH; do
+            if [ -z "${!s}" ]; then
+              echo "Segredo ausente: $s"; exit 1
+            fi
+          done
+        env:
+          DO_HOST: ${{ secrets.DO_HOST }}
+          DO_USER: ${{ secrets.DO_USER }}
+          DO_SSH_KEY: ${{ secrets.DO_SSH_KEY }}
+          DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
+
+      - name: Publicar no DigitalOcean
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            set -e
+            cd ${{ secrets.DO_APP_PATH }}
+            git fetch --all
+            git reset --hard origin/main
+            npm --prefix backend ci --omit=dev
+            npx --prefix backend prisma generate
+            # migrate deploy, nunca migrate dev (RF14).
+            npx --prefix backend prisma migrate deploy
+            npm --prefix backend run build
+            pm2 reload gestao-arena-api --update-env
+
+      - name: Confirmar healthcheck
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS "$URL/health" > /dev/null; then
+              echo "Healthcheck ok"; exit 0
+            fi
+            sleep 6
+          done
+          echo "Healthcheck não respondeu após a publicação"; exit 1
+        env:
+          URL: https://arenas-api.entretimes.com.br

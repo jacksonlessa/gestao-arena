@@ -1,0 +1,24 @@
+services:
+  mysql:
+    # Mesma versão principal do servidor de produção (Ubuntu 24.04 traz
+    # 8.0.46). Divergir aqui anula o motivo de manter um schema único.
+    image: mysql:8.0
+    container_name: gestao-arena-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: gestao_arena
+      MYSQL_USER: arena
+      MYSQL_PASSWORD: arena
+    ports:
+      - '3307:3306'
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-uroot', '-proot']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  mysql-data:

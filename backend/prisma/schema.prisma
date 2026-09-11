@@ -1,0 +1,14 @@
+// Um único schema para desenvolvimento e produção (D19 / PRD 00 RF06).
+// O ambiente local roda MySQL em contêiner na mesma versão principal da produção,
+// justamente para não existir divergência de tipo entre os dois.
+//
+// Nenhum modelo ainda: as entidades entram a partir do PRD 01.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}

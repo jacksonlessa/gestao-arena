@@ -1,0 +1,14 @@
+{
+  "name": "gestao-arena",
+  "private": true,
+  "scripts": {
+    "db:up": "docker compose up -d --wait mysql",
+    "db:down": "docker compose down",
+    "setup": "npm run db:up && npm --prefix backend install && npm --prefix front install && npm --prefix backend run prisma:generate && npm --prefix backend run prisma:deploy",
+    "dev:backend": "npm --prefix backend run start:dev",
+    "dev:front": "npm --prefix front run dev",
+    "lint": "npm --prefix backend run lint && npm --prefix front run lint",
+    "test": "npm --prefix backend run test && npm --prefix front run test",
+    "build": "npm --prefix backend run build && npm --prefix front run build"
+  }
+}
