@@ -1,5 +1,4 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "//": "Sai com 0 => build cancelado. Qualquer outro código => build. Se não houver commit pai (primeiro commit) ou o clone raso não tiver o pai, a verificação falha e o build acontece — na dúvida, construir.",
   "ignoreCommand": "git rev-parse --verify -q HEAD^ >/dev/null 2>&1 && git diff --quiet HEAD^ HEAD -- ."
 }
