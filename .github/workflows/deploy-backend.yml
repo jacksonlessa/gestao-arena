@@ -93,20 +93,35 @@ jobs:
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
         run: |
+          # Espaço ou quebra de linha colados junto no secret quebram o ssh.
+          DEPLOY_HOST="$(printf '%s' "$DEPLOY_HOST" | tr -d '[:space:]')"
+          DEPLOY_USER="$(printf '%s' "$DEPLOY_USER" | tr -d '[:space:]')"
+          DEPLOY_PORT="$(printf '%s' "$DEPLOY_PORT" | tr -d '[:space:]')"
           for s in SSH_KEY DEPLOY_HOST DEPLOY_USER; do
             [ -n "${!s}" ] || { echo "::error::Secret ausente: ${s/SSH_KEY/DEPLOY_SSH_KEY}"; exit 1; }
           done
 
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
+          # O que importa no DEPLOY_KNOWN_HOSTS é a CHAVE, não como o host foi
+          # escrito (IP, hostname, [host]:porta, hash do ssh-keyscan -H ou só
+          # "tipo chave"). Cada chave vira "droplet <tipo> <chave>" e o ssh
+          # procura por esse alias (HostKeyAlias abaixo). A verificação continua
+          # estrita: só as chaves do secret são aceitas.
           if [ -n "$KNOWN_HOSTS" ]; then
-            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+            printf '%s\n' "$KNOWN_HOSTS" | tr -d '\r' | awk '
+              /^[[:space:]]*(#|$)/ { next }
+              { for (i = 1; i < NF; i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/) { print "droplet", $i, $(i + 1); break } }
+            ' > ~/.ssh/known_hosts
+            [ -s ~/.ssh/known_hosts ] || { echo "::error::DEPLOY_KNOWN_HOSTS não contém nenhuma chave reconhecível (esperado: linhas '<host> ssh-ed25519 AAAA...')."; exit 1; }
           else
             echo "::warning::Secret DEPLOY_KNOWN_HOSTS não configurado: a chave do droplet está sendo aceita sem verificação (ssh-keyscan)."
-            ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" > ~/.ssh/known_hosts 2>/dev/null
+            ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" 2>/dev/null | awk '{ print "droplet", $2, $3 }' > ~/.ssh/known_hosts
           fi
+          echo "Chaves do droplet aceitas (impressões digitais):"
+          ssh-keygen -lf ~/.ssh/known_hosts
 
           cat > ~/.ssh/config <<SSHCONFIG
           Host droplet
@@ -115,10 +130,28 @@ jobs:
             User $DEPLOY_USER
             IdentityFile ~/.ssh/deploy_key
             IdentitiesOnly yes
+            HostKeyAlias droplet
             StrictHostKeyChecking yes
+            BatchMode yes
             ServerAliveInterval 30
           SSHCONFIG
           chmod 600 ~/.ssh/config
+
+          # Testa a conexão aqui, com diagnóstico, antes de qualquer envio.
+          if ! ssh droplet true 2> "$RUNNER_TEMP/ssh_err.txt"; then
+            cat "$RUNNER_TEMP/ssh_err.txt"
+            echo "Chaves que o droplet apresenta agora:"
+            ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" 2>/dev/null | ssh-keygen -lf - || true
+            if grep -q "Host key verification failed" "$RUNNER_TEMP/ssh_err.txt"; then
+              echo "::error::A chave do droplet não bate com DEPLOY_KNOWN_HOSTS. Compare as impressões digitais das duas listas acima e regere o secret no droplet (.github/deploy/README.md)."
+            elif grep -q "Permission denied" "$RUNNER_TEMP/ssh_err.txt"; then
+              echo "::error::O droplet recusou a chave: a pública de DEPLOY_SSH_KEY não está em ~$DEPLOY_USER/.ssh/authorized_keys, ou DEPLOY_USER está errado."
+            else
+              echo "::error::Falha de conexão SSH com o droplet (host, porta ou firewall)."
+            fi
+            exit 1
+          fi
+          echo "Conexão SSH ok."
 
       - name: Upload release to droplet
         env:
